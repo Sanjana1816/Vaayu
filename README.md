@@ -23,8 +23,6 @@ The initial version of Vaayu established a system far superior to simple SOS app
 | **Cloud** | Microsoft Azure | Scalable hosting and managed services. |
 | **Comms** | Twilio API | SMS-based alerting for the SOS system. |
 
-### Deadline for Project Completion
-September/2025
 
 ---
 
