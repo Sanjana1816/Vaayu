@@ -5,11 +5,30 @@ from sqlalchemy import func
 from geoalchemy2.shape import to_shape
 from twilio.rest import Client
 from core.config import settings
+from ai.logic import create_crisis_chain
+from services import navigation
 
 from db import models
 from db.database import get_db
 
 router = APIRouter()
+
+class RouteRequest(BaseModel):
+    start_node: str
+    end_node: str
+
+class RouteResponse(BaseModel):
+    path_nodes: list[str]
+    path_coordinates: list[tuple[float, float]]
+
+class SituationReportRequest(BaseModel):
+    # For now, we only need the transcript. We'll get location/risk from the DB. In a real app, this would also include heart_rate, etc.
+    transcript: str
+    heart_rate: int = 90 # Default normal heart rate
+
+class SituationReportResponse(BaseModel):
+    decision: str 
+    reasoning_context: dict # We'll return the data we used for transparency
 
 class LocationUpdate(BaseModel):
     latitude: float
@@ -137,8 +156,9 @@ def get_risk_score(lat: float, lon: float, db: Session = Depends(get_db)):
     Retrieves the risk score for a given latitude and longitude coordinate.
     """
     user_point_wkt = f'POINT({lon} {lat})'
+    geography_point = func.ST_GeogFromText(user_point_wkt)
     zone = db.query(models.RiskZone).filter(
-        func.ST_Contains(models.RiskZone.zone, func.ST_GeomFromText(user_point_wkt, 4326))
+        func.ST_DWithin(models.RiskZone.zone, geography_point, 0)
     ).first()
 
     if zone:
@@ -193,3 +213,69 @@ def create_sos_alert(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Failed to send SMS to any guardian.")
 
     return {"message": "SOS alerts sent successfully", "details": sent_messages}
+
+@router.post("/users/{user_id}/sitrep", response_model=SituationReportResponse)
+def post_situation_report(user_id: int, request: SituationReportRequest, db: Session = Depends(get_db)):
+    """
+    Receives a "Situation Report", uses the AI RAG chain to analyze it,
+    and returns the AI's decision.
+    """
+    # Step 1: Retrieve the user's risk score (re-using our existing logic)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.last_known_location:
+        raise HTTPException(status_code=400, detail="User location is unknown")
+
+    location_point = to_shape(user.last_known_location)
+    lon, lat = location_point.x, location_point.y
+    user_point_wkt = f'POINT({lon} {lat})'
+
+    geography_point = func.ST_GeogFromText(user_point_wkt)
+    zone = db.query(models.RiskZone).filter(
+        func.ST_DWithin(models.RiskZone.zone, geography_point, 0)
+    ).first()
+    
+    risk_score = zone.risk_score if zone else 1
+
+    # Step 2: Assemble the context for the RAG chain
+    context = {
+        "risk_score": risk_score,
+        "heart_rate": request.heart_rate,
+        "transcript": request.transcript
+    }
+
+    # Step 3: Create and invoke the AI chain
+    try:
+        crisis_chain = create_crisis_chain()
+        ai_decision = crisis_chain.invoke(context)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"AI service error: {e}")
+
+    # Step 4: Clean up the response and return it
+    final_decision = ai_decision.strip().upper()
+
+    return {
+        "decision": final_decision,
+        "reasoning_context": context
+    }
+
+@router.post("/navigate/safest-route", response_model=RouteResponse)
+def get_safest_route(request: RouteRequest, db: Session = Depends(get_db)):
+    """
+    Calculates the safest route between two points on our map.
+    It uses Dijkstra's algorithm on a graph where edge weights are determined by risk.
+    """
+    route = navigation.find_safest_route(
+        start_node=request.start_node,
+        end_node=request.end_node,
+        db=db
+    )
+    
+    if not route:
+        raise HTTPException(
+            status_code=404,
+            detail="No path found or invalid nodes provided. Valid nodes are: " + ", ".join(navigation.MAP_NODES.keys())
+        )
+        
+    return route

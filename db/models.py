@@ -4,7 +4,7 @@ from sqlalchemy import Column, Integer, String, TIMESTAMP, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from geoalchemy2 import Geometry
-
+from geoalchemy2 import Geography
 from .database import Base
 
 
@@ -15,7 +15,7 @@ class User(Base):
     name = Column(String)
     email = Column(String, unique=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
-    last_known_location = Column(Geometry(geometry_type='POINT', srid=4326), nullable=True)
+    last_known_location = Column(Geography(geometry_type='POINT', srid=4326), nullable=True)
     guardians = relationship("Guardian", back_populates="user")
 
 
@@ -33,5 +33,5 @@ class RiskZone(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    zone = Column(Geometry(geometry_type='POLYGON', srid=4326))
+    zone = Column(Geography(geometry_type='POLYGON', srid=4326))
     risk_score = Column(Integer)
